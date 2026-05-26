@@ -1,6 +1,6 @@
 import { exec } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -341,6 +341,48 @@ describe("syncOut", () => {
       // Verify no patch artifacts remain
       const patchesDir = join(hostDir, ".sandcastle", "patches");
       expect(existsSync(patchesDir)).toBe(false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("successful sync-out preserves tracked .sandcastle files", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "host-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "initial.txt", "initial", "initial commit");
+
+    // Commit tracked files inside .sandcastle, as a real repo would have
+    await mkdir(join(hostDir, ".sandcastle"), { recursive: true });
+    await commitFile(
+      hostDir,
+      join(".sandcastle", "prompt.md"),
+      "prompt",
+      "add .sandcastle config",
+    );
+    await commitFile(
+      hostDir,
+      join(".sandcastle", "Dockerfile"),
+      "FROM node",
+      "add Dockerfile",
+    );
+
+    const provider = testIsolated();
+    const handle = await provider.create({ env: {} });
+    try {
+      await Effect.runPromise(syncIn(hostDir, handle));
+
+      const wp = handle.worktreePath;
+      await handle.exec('echo "new file" > new.txt', { cwd: wp });
+      await handle.exec("git add new.txt", { cwd: wp });
+      await handle.exec('git commit -m "add new file"', { cwd: wp });
+
+      await Effect.runPromise(syncOut(hostDir, handle));
+
+      // The whole .sandcastle dir must not be deleted by cleanup
+      expect(existsSync(join(hostDir, ".sandcastle", "prompt.md"))).toBe(true);
+      expect(existsSync(join(hostDir, ".sandcastle", "Dockerfile"))).toBe(true);
+      // But the temporary patches dir should still be cleaned up
+      expect(existsSync(join(hostDir, ".sandcastle", "patches"))).toBe(false);
     } finally {
       await handle.close();
     }

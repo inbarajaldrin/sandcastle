@@ -98,6 +98,20 @@ export interface PodmanOptions {
    */
   readonly groups?: readonly (string | number)[];
   /**
+   * Host devices to expose to the container, via `--device`.
+   *
+   * Each entry is a full device spec in `host[:container[:permissions]]` form:
+   *
+   * - `["/dev/kvm"]` → `--device /dev/kvm`
+   * - `["/dev/sda:/dev/xvda:rwm"]` → `--device /dev/sda:/dev/xvda:rwm`
+   * - `["/dev/kvm", "/dev/fuse"]` → `--device /dev/kvm --device /dev/fuse`
+   *
+   * Under rootless Podman, exposing a host device often requires host-side
+   * group/permission setup and may interact with `--userns=keep-id`.
+   * When omitted, no `--device` flags are added.
+   */
+  readonly devices?: readonly string[];
+  /**
    * Maximum number of characters of streamed `exec` output retained per stream
    * (stdout and stderr) when an `onLine` callback is supplied (default: 64KiB).
    *
@@ -197,6 +211,10 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         "--group-add",
         String(g),
       ]);
+      const deviceArgs = (options?.devices ?? []).flatMap((d) => [
+        "--device",
+        d,
+      ]);
       const cpusArgs =
         options?.cpus !== undefined ? ["--cpus", String(options.cpus)] : [];
 
@@ -213,6 +231,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
             ...usernsArgs,
             ...networkArgs,
             ...groupArgs,
+            ...deviceArgs,
             ...cpusArgs,
             "-w",
             worktreePath,

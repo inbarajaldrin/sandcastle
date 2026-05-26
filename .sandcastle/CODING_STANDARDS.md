@@ -42,6 +42,10 @@ Host-side paths (anything under `tmpdir()`, `hostRepoDir`, the host projects dir
 
 ---
 
+When comparing two paths — `===`, `startsWith`, `Set.has`, `.includes`, etc. — normalize separators on both sides first (e.g. `p.replace(/\\/g, "/")`). `git` reports forward slashes on every platform, while `node:path.join`/`normalize` emit `\` on Windows, so a raw comparison between a git-derived path and a join-derived path silently fails on Windows. This is invisible on Linux/macOS CI because both sources emit `/` there, so it will not surface in tests unless you deliberately mix the two separator styles. When the result is returned for downstream `join`/fs use, re-apply platform-native `normalize` so callers get consistent separators; only the comparison needs forward slashes.
+
+---
+
 Optional parameters passed to functions should be scrutinised extremely carefully. They are a huge source of bugs (by omission). Prioritise correctness over backwards compatibility.
 
 ---

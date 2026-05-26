@@ -89,6 +89,18 @@ export interface DockerOptions {
    */
   readonly groups?: readonly (string | number)[];
   /**
+   * Host devices to expose to the container, via `--device`.
+   *
+   * Each entry is a full device spec in `host[:container[:permissions]]` form:
+   *
+   * - `["/dev/kvm"]` → `--device /dev/kvm`
+   * - `["/dev/sda:/dev/xvda:rwm"]` → `--device /dev/sda:/dev/xvda:rwm`
+   * - `["/dev/kvm", "/dev/fuse"]` → `--device /dev/kvm --device /dev/fuse`
+   *
+   * When omitted, no `--device` flags are added.
+   */
+  readonly devices?: readonly string[];
+  /**
    * Maximum number of characters of streamed `exec` output retained per stream
    * (stdout and stderr) when an `onLine` callback is supplied (default: 64KiB).
    *
@@ -178,6 +190,7 @@ export const docker = (options?: DockerOptions): SandboxProvider => {
             user: `${containerUid}:${containerGid}`,
             network: options?.network,
             groups: options?.groups,
+            devices: options?.devices,
             cpus: options?.cpus,
             selinuxLabel,
           },

@@ -356,7 +356,7 @@ export const syncOut = (
           try {
             const remaining = await readdir(patchesRoot);
             if (remaining.length === 0) {
-              await rm(join(hostRepoDir, ".sandcastle"), {
+              await rm(patchesRoot, {
                 recursive: true,
                 force: true,
               });

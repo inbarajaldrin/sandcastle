@@ -157,6 +157,9 @@ const result = await run({
     // Optional: add the container user to supplementary groups via --group-add.
     // Accepts group names or numeric GIDs (e.g. for a bind-mounted Docker socket).
     groups: ["docker", 999],
+    // Optional: expose host devices via --device. Each entry is a full device
+    // spec in host[:container[:permissions]] form (e.g. "/dev/kvm").
+    devices: ["/dev/kvm"],
     // Optional: limit CPU resources via --cpus. Fractional values allowed (e.g. 1.5).
     // cpus: 2,
   }),
@@ -832,11 +835,11 @@ The `claudeCode()` factory accepts an optional second argument for provider-spec
 agent: claudeCode("claude-opus-4-7", { effort: "high" });
 ```
 
-| Option            | Type                                         | Default | Description                                               |
-| ----------------- | -------------------------------------------- | ------- | --------------------------------------------------------- |
-| `effort`          | `"low"` \| `"medium"` \| `"high"` \| `"max"` | —       | Claude Code reasoning effort level (`max` is Opus only)   |
-| `env`             | `Record<string, string>`                     | `{}`    | Environment variables injected by this agent provider     |
-| `captureSessions` | `boolean`                                    | `true`  | Capture agent session JSONL to host for `claude --resume` |
+| Option            | Type                                                      | Default | Description                                               |
+| ----------------- | --------------------------------------------------------- | ------- | --------------------------------------------------------- |
+| `effort`          | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | —       | Claude Code reasoning effort level (`max` is Opus only)   |
+| `env`             | `Record<string, string>`                                  | `{}`    | Environment variables injected by this agent provider     |
+| `captureSessions` | `boolean`                                                 | `true`  | Capture agent session JSONL to host for `claude --resume` |
 
 ### `CodexOptions`
 

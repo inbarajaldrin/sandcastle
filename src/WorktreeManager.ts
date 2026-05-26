@@ -1,7 +1,7 @@
 import { Effect, Option } from "effect";
 import { FileSystem } from "@effect/platform";
 import { execFile } from "node:child_process";
-import { join } from "node:path";
+import { join, normalize } from "node:path";
 import { WorktreeError, WorktreeTimeoutError, withTimeout } from "./errors.js";
 
 const WORKTREE_TIMEOUT_MS = 30_000;
@@ -78,10 +78,65 @@ export interface WorktreeInfo {
   branch: string;
 }
 
-interface WorktreeEntry {
+/** A single entry parsed from `git worktree list --porcelain`. */
+export interface WorktreeEntry {
   path: string;
+  /** `null` for a detached HEAD (e.g. mid-rebase). */
   branch: string | null;
 }
+
+/**
+ * Normalizes path separators to forward slashes.
+ *
+ * `git worktree list --porcelain` reports paths with forward slashes on every
+ * platform, but `node:path.join` produces backslashes on Windows. Comparing
+ * the two without normalizing fails on Windows, so all path comparisons in
+ * this module run both sides through this first.
+ */
+const normalizePath = (p: string): string => p.replace(/\\/g, "/");
+
+/**
+ * Finds an existing worktree that collides with `branch` or `worktreePath`.
+ *
+ * Matches by branch first, then falls back to a path match — covering the
+ * mid-rebase detached-HEAD case where git reports a `null` branch. The path
+ * fallback normalizes separators so it works on Windows.
+ */
+export const findCollidingWorktree = (
+  existing: readonly WorktreeEntry[],
+  branch: string,
+  worktreePath: string,
+): WorktreeEntry | undefined =>
+  existing.find((wt) => wt.branch === branch) ??
+  existing.find((wt) => normalizePath(wt.path) === normalizePath(worktreePath));
+
+/**
+ * Whether `worktreePath` lives under `worktreesDir` (i.e. is a worktree managed
+ * by sandcastle rather than the main working tree or an external worktree).
+ * Separators are normalized so the check holds on Windows.
+ */
+export const isManagedWorktreePath = (
+  worktreePath: string,
+  worktreesDir: string,
+): boolean =>
+  normalizePath(worktreePath).startsWith(normalizePath(worktreesDir));
+
+/**
+ * Whether a directory entry under `.sandcastle/worktrees/` is orphaned — not
+ * present in the set of active worktree paths reported by git. Both sides are
+ * normalized so paths from `join` (backslashes on Windows) match git's
+ * forward-slash output.
+ */
+export const isOrphanedWorktreePath = (
+  entryPath: string,
+  activeWorktreePaths: Iterable<string>,
+): boolean => {
+  const normalizedEntry = normalizePath(entryPath);
+  for (const active of activeWorktreePaths) {
+    if (normalizePath(active) === normalizedEntry) return false;
+  }
+  return true;
+};
 
 /** Parses `git worktree list --porcelain` output into structured entries. */
 const listWorktrees = (
@@ -170,13 +225,10 @@ export const create = (
       // Match by branch first; fall back to target path (covers mid-rebase
       // detached-HEAD state where the branch field is null).
       const existing = yield* listWorktrees(repoDir);
-      const collision =
-        existing.find((wt) => wt.branch === branch) ??
-        existing.find((wt) => wt.path === worktreePath);
+      const collision = findCollidingWorktree(existing, branch, worktreePath);
       if (collision) {
         // Only reuse worktrees managed by sandcastle (under .sandcastle/worktrees/)
-        const isManagedWorktree = collision.path.startsWith(worktreesDir);
-        if (isManagedWorktree) {
+        if (isManagedWorktreePath(collision.path, worktreesDir)) {
           const dirty = yield* hasUncommittedChanges(collision.path);
           if (dirty) {
             console.warn(
@@ -187,7 +239,9 @@ export const create = (
               `Reusing existing worktree at ${collision.path} (branch '${branch}')`,
             );
           }
-          return { path: collision.path, branch };
+          // git reports forward slashes even on Windows; return a
+          // platform-native path so downstream join/fs calls stay consistent.
+          return { path: normalize(collision.path), branch };
         }
         // Branch is checked out in the main working tree or external worktree
         yield* Effect.fail(
@@ -351,7 +405,7 @@ export const pruneStale = (
         Effect.map((s) => s.type === "Directory"),
         Effect.catchAll(() => Effect.succeed(false)),
       );
-      if (isDir && !activeWorktreePaths.has(entryPath)) {
+      if (isDir && isOrphanedWorktreePath(entryPath, activeWorktreePaths)) {
         yield* fs.remove(entryPath, { recursive: true, force: true }).pipe(
           Effect.mapError(
             (e) =>
