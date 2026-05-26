@@ -24,33 +24,90 @@
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
-const extractPlanIssues = (
-  stdout: string,
-): { id: string; title: string; branch: string }[] => {
-  const candidates: string[] = [];
-  const planMatch = stdout.match(/<plan>([\s\S]*?)<\/plan>/i);
-  if (planMatch?.[1]) candidates.push(planMatch[1]);
-  const fencedJsonMatch = stdout.match(/```json\s*([\s\S]*?)```/i);
-  if (fencedJsonMatch?.[1]) candidates.push(fencedJsonMatch[1]);
-  const firstObjectMatch = stdout.match(/\{[\s\S]*?\}/);
-  if (firstObjectMatch?.[0]) candidates.push(firstObjectMatch[0]);
+// ---------------------------------------------------------------------------
+// Plan output schema
+//
+// `Output.object` extracts the planner's <plan> JSON from stdout and validates
+// it against a Standard Schema (https://standardschema.dev) validator. We
+// hand-roll a tiny one below so this template depends only on
+// `@ai-hero/sandcastle`. It should be trivial to swap in Zod instead — delete
+// everything down to `planSchema` and write:
+//
+//   import { z } from "zod";
+//   const planSchema = z.object({
+//     issues: z.array(
+//       z.object({ id: z.string(), title: z.string(), branch: z.string() }),
+//     ),
+//   });
+// ---------------------------------------------------------------------------
 
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate) as {
-        issues?: { id: string; title: string; branch: string }[];
-      };
-      if (Array.isArray(parsed.issues)) {
-        return parsed.issues;
-      }
-    } catch {
-      // Try the next candidate.
-    }
+interface PlanIssue {
+  id: string;
+  title: string;
+  branch: string;
+}
+
+// The slice of the Standard Schema interface that `Output.object` consumes.
+// The optional `types` field is phantom — it carries the inferred output type
+// so `plan.output` is typed, but is never present at runtime.
+interface PlanStandardSchema {
+  "~standard": {
+    version: 1;
+    vendor: string;
+    validate: (
+      value: unknown,
+    ) => { value: { issues: PlanIssue[] } } | { issues: { message: string }[] };
+    types?: { input: unknown; output: { issues: PlanIssue[] } };
+  };
+}
+
+const asString = (value: unknown, label: string): string => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${label} must be a non-empty string`);
   }
+  return value;
+};
 
-  throw new Error(
-    "Planning agent did not produce parseable plan JSON.\n\n" + stdout,
-  );
+const planSchema: PlanStandardSchema = {
+  "~standard": {
+    version: 1,
+    vendor: "sandcastle-template",
+    validate: (value) => {
+      try {
+        if (typeof value !== "object" || value === null) {
+          throw new Error("plan must be a JSON object");
+        }
+        const issues = (value as { issues?: unknown }).issues;
+        if (!Array.isArray(issues)) {
+          throw new Error("plan.issues must be an array");
+        }
+        return {
+          value: {
+            issues: issues.map((issue, i) => {
+              if (typeof issue !== "object" || issue === null) {
+                throw new Error(`plan.issues[${i}] must be an object`);
+              }
+              const record = issue as Record<string, unknown>;
+              return {
+                id: asString(record.id, `plan.issues[${i}].id`),
+                title: asString(record.title, `plan.issues[${i}].title`),
+                branch: asString(record.branch, `plan.issues[${i}].branch`),
+              };
+            }),
+          },
+        };
+      } catch (error) {
+        return {
+          issues: [
+            {
+              message:
+                error instanceof Error ? error.message : "Invalid plan output",
+            },
+          ],
+        };
+      }
+    },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -86,22 +143,25 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   // builds a dependency graph, and selects the issues that can be worked in
   // parallel right now (i.e., no blocking dependencies on other open issues).
   //
-  // It outputs a <plan> JSON block — we parse that to drive Phase 2.
+  // It outputs a <plan> JSON block — Output.object parses and validates it.
   // -------------------------------------------------------------------------
   const plan = await sandcastle.run({
     hooks,
     sandbox: docker(),
     name: "planner",
     // One iteration is enough: the planner just needs to read and reason,
-    // not write code.
+    // not write code. (Structured output requires maxIterations: 1.)
     maxIterations: 1,
     // Opus for planning: dependency analysis benefits from deeper reasoning.
     agent: sandcastle.claudeCode("claude-opus-4-7"),
     promptFile: "./.sandcastle/plan-prompt.md",
+    // Extract and validate the <plan> JSON into a typed object. Throws
+    // StructuredOutputError if the tag is missing, the JSON is malformed, or
+    // validation fails — which aborts the loop.
+    output: sandcastle.Output.object({ tag: "plan", schema: planSchema }),
   });
 
-  // Parse planner output robustly: <plan> tags, fenced JSON, or raw JSON.
-  const issues = extractPlanIssues(plan.stdout);
+  const issues = plan.output.issues;
 
   if (issues.length === 0) {
     // No unblocked work — either everything is done or everything is blocked.

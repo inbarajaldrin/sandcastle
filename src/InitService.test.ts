@@ -1526,6 +1526,22 @@ describe("InitService scaffold", () => {
       expect(main).not.toContain("`  #${");
     });
 
+    it("parallel-planner main.mts uses Output.object for the plan", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "parallel-planner",
+      });
+
+      const main = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(main).toContain("Output.object");
+      expect(main).toContain('tag: "plan"');
+      expect(main).toContain("plan.output.issues");
+      expect(main).not.toContain("extractPlanIssues");
+    });
+
     it("parallel-planner implement-prompt uses TASK_ID placeholder", async () => {
       const dir = await makeDir();
       await runScaffold(dir, {
@@ -1677,6 +1693,22 @@ describe("InitService scaffold", () => {
       expect(main).not.toContain("number: number");
       expect(main).not.toContain("ISSUE_NUMBER");
       expect(main).not.toContain("`  #${");
+    });
+
+    it("parallel-planner-with-review main.mts uses Output.object for the plan", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "parallel-planner-with-review",
+      });
+
+      const main = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(main).toContain("Output.object");
+      expect(main).toContain('tag: "plan"');
+      expect(main).toContain("plan.output.issues");
+      expect(main).not.toContain("extractPlanIssues");
     });
 
     it("parallel-planner-with-review implement-prompt does not contain close-issue instruction", async () => {
