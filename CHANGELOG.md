@@ -1,5 +1,11 @@
 # @ai-hero/sandcastle
 
+## 0.6.6
+
+### Patch Changes
+
+- 72637ae: Replace the `SessionStore`-based public API with pure JSONL transfer helpers. The previous `hostSessionStore`, `sandboxSessionStore`, `codexHostSessionStore`, `codexSandboxSessionStore` exports and the `SessionStore` type were the implementation seam used internally to read/write agent session files. They are now removed in favour of pure-string helpers — `transferClaudeSession(jsonl, fromCwd, toCwd)` and `transferCodexSession(jsonl, fromCwd, toCwd)` — that rewrite a session JSONL without touching the filesystem. Path helpers (`claudeHostSessionPath`, `claudeSandboxSessionPath`, `encodeProjectPath`) and the host-side scan utilities (`findClaudeSessionOnHost`, `findCodexSessionOnHost`, `HostSessionLookup`) are exposed instead, so callers building a custom `AgentSessionStorage` do their own file I/O at the call site. The built-in `claudeCode()` and `codex()` providers are unchanged for end users — only direct consumers of the removed store factories need to migrate.
+
 ## 0.6.5
 
 ### Patch Changes
