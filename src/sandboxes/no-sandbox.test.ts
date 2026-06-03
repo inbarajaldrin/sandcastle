@@ -1,5 +1,41 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { noSandbox } from "./no-sandbox.js";
+
+/** Is the cgroup-v2 reap path (systemd-run --user --scope) available on this host? */
+function cgroupReapAvailable(): boolean {
+  if (process.platform !== "linux" || !process.env.XDG_RUNTIME_DIR)
+    return false;
+  if (!existsSync("/sys/fs/cgroup/cgroup.controllers")) return false;
+  try {
+    execFileSync("sh", ["-c", "command -v systemd-run >/dev/null 2>&1"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Poll until `pid` no longer exists (signal-0 probe → ESRCH), or time out. Event-based, not a blind sleep. */
+async function waitUntilGone(pid: number, timeoutMs = 8000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true; // ESRCH — reaped
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+
+const pidFromLines = (lines: string[], tag: string): number => {
+  const line = lines.find((l) => l.includes(`${tag}=`));
+  const m = line?.match(new RegExp(`${tag}=(\\d+)`));
+  if (!m) throw new Error(`no ${tag}= line in: ${JSON.stringify(lines)}`);
+  return Number(m[1]);
+};
 
 describe("noSandbox", () => {
   it("returns a provider with tag 'none'", () => {
@@ -160,5 +196,101 @@ describe("noSandbox", () => {
 
       await expect(handle.close()).resolves.toBeUndefined();
     });
+  });
+
+  // ── orphan reaping ─────────────────────────────────────────────────────────
+  // Children the agent backgrounds must not outlive the run. These spawn real
+  // processes and observe the real reap signal (pid gone), with a short grace.
+  describe("reaping", () => {
+    const prevGrace = process.env.SC_REAP_GRACE_S;
+    beforeAll(() => {
+      process.env.SC_REAP_GRACE_S = "1"; // dial the TERM→KILL grace down for tests
+    });
+    afterAll(() => {
+      if (prevGrace === undefined) delete process.env.SC_REAP_GRACE_S;
+      else process.env.SC_REAP_GRACE_S = prevGrace;
+    });
+
+    it("sweeps a backgrounded (&) child left behind after a clean exit", async () => {
+      const provider = noSandbox();
+      const handle = await provider.create({
+        worktreePath: process.cwd(),
+        env: {},
+      });
+
+      const lines: string[] = [];
+      // Background a long sleep, print its PID, then exit cleanly.
+      const result = await handle.exec('sleep 120 & echo "BG=$!"; exit 0', {
+        onLine: (l) => lines.push(l),
+      });
+      expect(result.exitCode).toBe(0);
+
+      const bg = pidFromLines(lines, "BG");
+      // The agent exited, but the backgrounded child must be reaped (not leaked).
+      expect(await waitUntilGone(bg)).toBe(true);
+    });
+
+    it("reaps the whole tree when the run is aborted mid-flight", async () => {
+      const provider = noSandbox();
+      const handle = await provider.create({
+        worktreePath: process.cwd(),
+        env: {},
+      });
+
+      const ac = new AbortController();
+      const lines: string[] = [];
+      // Foreground sleep keeps the run alive; a backgrounded sleep is the orphan risk.
+      const execPromise = handle.exec(
+        'sleep 120 & echo "BG=$!"; echo "READY"; sleep 120',
+        { onLine: (l) => lines.push(l), signal: ac.signal },
+      );
+      // Wait for the run to be up (READY printed) before aborting — event-based.
+      const start = Date.now();
+      while (!lines.includes("READY") && Date.now() - start < 5000) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(lines).toContain("READY");
+      const bg = pidFromLines(lines, "BG");
+
+      ac.abort("test abort");
+      const result = await execPromise;
+
+      // Reaped runs surface a loud, attributable, non-zero result (fail-loud).
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("[no-sandbox reaper]");
+      // ...and the backgrounded child is actually gone.
+      expect(await waitUntilGone(bg)).toBe(true);
+    });
+
+    it.runIf(cgroupReapAvailable())(
+      "reaps a setsid escapee (own session — would survive killpg) via the cgroup",
+      async () => {
+        const provider = noSandbox();
+        const handle = await provider.create({
+          worktreePath: process.cwd(),
+          env: {},
+        });
+
+        const ac = new AbortController();
+        const lines: string[] = [];
+        // setsid => the child is its own session/group leader and ESCAPES any
+        // process-group kill. Only cgroup reaping catches it.
+        const execPromise = handle.exec(
+          'setsid sleep 120 & sleep 0.3; echo "ESC=$(pgrep -n -f \'sleep 120\')"; echo "READY"; sleep 120',
+          { onLine: (l) => lines.push(l), signal: ac.signal },
+        );
+        const start = Date.now();
+        while (!lines.includes("READY") && Date.now() - start < 5000) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        expect(lines).toContain("READY");
+        const esc = pidFromLines(lines, "ESC");
+
+        ac.abort("test abort");
+        await execPromise;
+
+        expect(await waitUntilGone(esc)).toBe(true);
+      },
+    );
   });
 });

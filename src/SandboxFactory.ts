@@ -23,6 +23,7 @@ import type {
   BindMountSandboxHandle,
   IsolatedSandboxHandle,
   NoSandboxHandle,
+  ExecOptions,
 } from "./SandboxProvider.js";
 import { runHostHooks, type SandboxHooks } from "./SandboxLifecycle.js";
 import { startSandbox } from "./startSandbox.js";
@@ -38,12 +39,7 @@ export interface ExecResult {
 export interface SandboxService {
   readonly exec: (
     command: string,
-    options?: {
-      onLine?: (line: string) => void;
-      cwd?: string;
-      sudo?: boolean;
-      stdin?: string;
-    },
+    options?: ExecOptions,
   ) => Effect.Effect<ExecResult, ExecError>;
 
   /** Copy a file or directory from the host into the sandbox. */

@@ -40,6 +40,12 @@ const invokeAgent = (
     let sessionId: string | undefined;
     let usage: IterationUsage | undefined;
 
+    // Cancels the spawned command (and lets the provider reap its whole process
+    // tree). raceFirst alone only ABANDONS the awaited exec — the agent and any
+    // children it backgrounded keep running. Both the idle timeout and the
+    // external signal abort this so the provider actually tears the run down.
+    const reapController = new AbortController();
+
     // Deferred that will be failed when the idle timer fires
     const timeoutSignal = yield* Deferred.make<never, AgentIdleTimeoutError>();
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -60,6 +66,10 @@ const invokeAgent = (
     const resetIdleTimer = () => {
       if (timeoutHandle !== null) clearTimeout(timeoutHandle);
       timeoutHandle = setTimeout(() => {
+        // Reap the spawned tree (not just abandon the promise), then fail the race.
+        reapController.abort(
+          `idle timeout: no output for ${idleTimeoutMs / 1000}s`,
+        );
         Effect.runPromise(
           Deferred.fail(
             timeoutSignal,
@@ -83,6 +93,7 @@ const invokeAgent = (
         return yield* Effect.die(signal.reason);
       }
       const onAbort = () => {
+        reapController.abort(signal.reason); // reap the spawned tree, don't just abandon it
         Effect.runPromise(Deferred.die(abortDeferred, signal.reason)).catch(
           () => {},
         );
@@ -100,6 +111,7 @@ const invokeAgent = (
         resumeSession,
       });
       const execResult = yield* sandbox.exec(printCmd.command, {
+        signal: reapController.signal,
         onLine: (line) => {
           resetIdleTimer();
           for (const parsed of provider.parseStreamLine(line)) {
