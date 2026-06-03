@@ -2282,6 +2282,76 @@ describe("Orchestrator Display integration", () => {
     }
   }, 10_000);
 
+  it("aborts the exec signal on idle timeout (so the provider can reap, not just abandon)", async () => {
+    // Regression guard for the orphan-reaper wiring: raceFirst alone only ABANDONS
+    // the awaited exec — the agent + any children it backgrounded keep running. The
+    // fix gives exec an AbortSignal that the idle timeout (and external cancel) fire,
+    // so the provider reaps the whole process tree. Here we assert the Orchestrator
+    // (a) passes an AbortSignal into exec and (b) aborts it when the idle timer fires.
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-reap-signal-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    let capturedSignal: AbortSignal | undefined;
+    let sawAbort = false;
+
+    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) => {
+      const real = makeLocalSandbox(dir);
+      return {
+        exec: (command, options) => {
+          if (command.startsWith("claude ")) {
+            capturedSignal = options?.signal;
+            // Simulate a hung agent: emit nothing, and settle ONLY once aborted
+            // (this is where the real provider reaps + resolves with a failure).
+            // If the signal is never wired/aborted, this hangs past the test
+            // deadline — so a regression fails loudly rather than silently passing.
+            return Effect.promise(
+              () =>
+                new Promise((resolve) => {
+                  const reaped = () => {
+                    sawAbort = true;
+                    resolve({ stdout: "", stderr: "[reaped]", exitCode: 137 });
+                  };
+                  const sig = options?.signal;
+                  if (!sig) return; // no signal => hang (regression)
+                  if (sig.aborted) return reaped();
+                  sig.addEventListener("abort", reaped, { once: true });
+                }),
+            );
+          }
+          return real.exec(command, options);
+        },
+        copyIn: real.copyIn,
+        copyFileOut: real.copyFileOut,
+      };
+    });
+
+    const exitResult = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "test",
+        idleTimeoutSeconds: 0.1, // 100ms — no output ever, so the idle timer fires
+      }).pipe(
+        Effect.provide(Layer.merge(factoryLayer, testDisplayLayer)),
+        Effect.exit,
+      ),
+    );
+
+    // The idle timeout still surfaces as the orchestration failure...
+    expect(exitResult._tag).toBe("Failure");
+    if (exitResult._tag === "Failure") {
+      expect(Cause.squash(exitResult.cause)).toBeInstanceOf(
+        AgentIdleTimeoutError,
+      );
+    }
+    // ...AND exec received an AbortSignal that the orchestrator aborted on idle —
+    // the wiring that turns "abandon the promise" into "reap the process tree".
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(sawAbort).toBe(true);
+  }, 10_000);
+
   it("resets the idle timer on each text/tool_call output", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-idle-reset-"));
 
